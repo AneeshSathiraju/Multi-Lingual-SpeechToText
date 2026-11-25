@@ -1,8 +1,10 @@
 """HTTP layer only: parse the request, call the other modules, translate errors."""
 import logging
 import time
+from audio.preprocessor import decode_to_mono, decode_to_mono_16k, duration_seconds, encode_wav
+from audio.noise_filter import reduce_noise
 
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, Request, Response, UploadFile
 
 from audio.loader import (
     AudioDecodeError, AudioError, EmptyAudioError, FFmpegNotFoundError,
@@ -73,4 +75,37 @@ def transcribe(
         language_source="explicit" if language_code else "auto",
         model=transcriber.model_size,
         device=transcriber.device,
+    )
+DENOISE_SAMPLE_RATE = 16_000  # raise to 44100 for non-speech material
+
+
+@router.post("/denoise")
+def denoise(
+    request: Request,
+    file: UploadFile = File(..., description="Noisy audio file"),
+    strength: float = Query(0.8, ge=0.0, le=1.0, description="0 = no change, 1 = maximum reduction"),
+    stationary: bool = Query(True, description="True for steady noise (fan, hum); False for changing noise"),
+):
+    started = time.perf_counter()
+    settings = request.app.state.settings
+
+    try:
+        with temp_audio_file(file.file, file.filename, settings.max_upload_bytes) as path:
+            audio = decode_to_mono(path, DENOISE_SAMPLE_RATE)
+        cleaned = reduce_noise(audio, DENOISE_SAMPLE_RATE, strength=strength, stationary=stationary)
+        wav = encode_wav(cleaned, DENOISE_SAMPLE_RATE)
+    except AudioError as exc:
+        raise HTTPException(status_code=_AUDIO_ERROR_STATUS.get(type(exc), 400), detail=str(exc))
+    except Exception:
+        logger.exception("Unexpected error during denoising")
+        raise HTTPException(status_code=500, detail="Internal error during denoising.")
+
+    return Response(
+        content=wav,
+        media_type="audio/wav",
+        headers={
+            "Content-Disposition": 'attachment; filename="denoised.wav"',
+            "X-Audio-Duration-Seconds": f"{duration_seconds(audio, DENOISE_SAMPLE_RATE):.2f}",
+            "X-Processing-Time-Seconds": f"{time.perf_counter() - started:.2f}",
+        },
     )
