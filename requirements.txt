@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+python-multipart      # required by FastAPI for file uploads
+faster-whisper
+numpy
+pydantic
+pytest
+httpx                 # required by FastAPI's TestClient
